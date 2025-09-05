@@ -1,0 +1,45 @@
+name: Integration Tests (LocalStack)
+
+on:
+  pull_request:
+  push:
+    branches: [ main, dev ]
+
+jobs:
+  itests:
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack:latest
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: lambda,dynamodb,dynamodbstreams,sqs,sns,events,logs,iam,sts
+          AWS_DEFAULT_REGION: us-east-1
+        options: >-
+          --health-cmd="curl -s http://localhost:4566/_localstack/health | grep '"initialized": true'"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Deploy to LocalStack
+        run: |
+          export IS_LOCAL=true
+          npx serverless deploy --stage local
+      - name: Seed
+        run: |
+          export IS_LOCAL=true
+          npx ts-node --transpile-only scripts/seed.ts
+      - name: Run tests
+        run: |
+          export IS_LOCAL=true
+          npm test -- --runInBand
+      - name: Remove stack
+        if: always()
+        run: |
+          export IS_LOCAL=true
+          npx serverless remove --stage local
