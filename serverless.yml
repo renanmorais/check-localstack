@@ -1,0 +1,144 @@
+service: localstack-skeleton
+frameworkVersion: '3'
+configValidationMode: error
+
+plugins:
+  - serverless-localstack
+  - serverless-esbuild
+  - serverless-offline
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  stage: ${opt:stage, 'local'}
+  httpApi:
+    cors: true
+  environment:
+    AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+    AWS_REGION: ${self:provider.region}
+    IS_LOCAL: ${strToBool(${env:IS_LOCAL, 'true'})}
+    TABLE_NAME: documentParser
+    QUEUE_NAME: app-queue
+    TOPIC_NAME: app-topic
+    EVENT_BUS_NAME: ${self:custom.eventBusName}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:*
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - sqs:*
+            - sns:*
+            - events:*
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: "*"
+custom:
+  eventBusName: ${env:EVENT_BUS_NAME, '${self:service}-${sls:stage}-bus'}
+  localstack:
+    stages:
+      - local
+    host: http://localhost
+    edgePort: 4566
+    autostart: false
+    lambda:
+      mountCode: true
+    docker:
+      sudo: false
+    readyCheck: true
+    readyCheckTimeout: 120
+  esbuild:
+    bundle: true
+    target: node20
+    platform: node
+    sourcemap: true
+    external: [ '@aws-sdk/*' ]
+
+package:
+  individually: true
+
+functions:
+  httpPing:
+    handler: src/handlers/httpPing.handler
+    events:
+      - http:
+          path: ping
+          method: GET
+          cors: true
+
+  userCreated:
+    handler: src/handlers/userCreated.handler
+    events:
+      - eventBridge:
+          eventBus: !Ref AppBus
+          pattern:
+            source:
+              - app.example
+            detail-type:
+              - user.created
+
+resources:
+  Resources:
+    DocumentParserTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.TABLE_NAME}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
+
+    AppQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:provider.environment.QUEUE_NAME}
+
+    AppTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:provider.environment.TOPIC_NAME}
+
+    AppBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: ${self:provider.environment.EVENT_BUS_NAME}
+
+    EBRuleToSQS:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: app-rule-to-sqs
+        EventBusName: !Ref AppBus
+        EventPattern:
+          source:
+            - app.example
+          detail-type:
+            - user.created
+        Targets:
+          - Arn: !GetAtt AppQueue.Arn
+            Id: target-sqs
+
+    EBPermissionToSQS:
+      Type: AWS::IAM::Policy
+      Properties:
+        PolicyName: events-to-sqs
+        Roles:
+          - !Ref IamRoleLambdaExecution
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt AppQueue.Arn
